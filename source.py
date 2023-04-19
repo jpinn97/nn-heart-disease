@@ -21,17 +21,21 @@ scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
-# Create a neural network model
+from keras.regularizers import l1, l2
+
 model = Sequential()
-model.add(Dense(16, input_dim=X_train.shape[1], activation='relu'))
-model.add(Dense(8, activation='relu'))
+model.add(Dense(32, input_dim=9, activation='relu', kernel_regularizer=l1(0.01)))
+model.add(Dense(16, activation='relu', kernel_regularizer=l2(0.01)))
 model.add(Dense(1, activation='sigmoid'))
 
+model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+
 # Compile the model
-model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.001), metrics=['accuracy'])
+model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0005), metrics=['accuracy'])
 
 # Train the model
-model.fit(X_train, y_train, epochs=5000, batch_size=64, verbose=1)
+model.fit(X_train, y_train, epochs=100, batch_size=32, verbose=1)
 
 # Evaluate the model
 _, accuracy = model.evaluate(X_test, y_test, verbose=1)
@@ -53,6 +57,12 @@ from sklearn.metrics import classification_report, confusion_matrix
 print("Classification Report:")
 print(classification_report(y_test, binary_predictions))
 
+# Print confusion matrix
+tn, fp, fn, tp = confusion_matrix(y_test, binary_predictions).ravel()
 print("Confusion Matrix:")
-print(confusion_matrix(y_test, binary_predictions))
+print(f"True Negatives: {tn}")
+print(f"False Positives: {fp}")
+print(f"False Negatives: {fn}")
+print(f"True Positives: {tp}")
+
 

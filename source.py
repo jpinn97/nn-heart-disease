@@ -15,31 +15,53 @@ df = pd.DataFrame(data, columns=[attr[0] for attr in dataset["attributes"]])
 
 # Preprocessing
 X = df.iloc[:, :-1].values
-y = df.iloc[:, -1].values.astype(int) - 1  # Convert labels to integers and subtract 1 to have labels in {0, 1}
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+y = (
+    df.iloc[:, -1].values.astype(int) - 1
+)  # Convert labels to integers and subtract 1 to have labels in {0, 1}
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
 scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
-from keras.regularizers import l1, l2
+from tensorflow.keras.regularizers import l1, l2
 
 model = Sequential()
-model.add(Dense(32, input_dim=9, activation='relu', kernel_regularizer=l1(0.01)))
-model.add(Dense(16, activation='relu', kernel_regularizer=l2(0.01)))
-model.add(Dense(1, activation='sigmoid'))
+model.add(Dense(256, activation="relu", kernel_regularizer=l2(0.02)))
+model.add(Dense(128, activation="relu", kernel_regularizer=l2(0.02)))
+model.add(Dense(64, activation="relu", kernel_regularizer=l2(0.02)))
+model.add(Dense(32, activation="relu", kernel_regularizer=l2(0.02)))
+model.add(Dense(16, activation="relu", kernel_regularizer=l2(0.02)))
+model.add(Dense(1, activation="sigmoid"))
 
-model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+from tensorflow.keras.optimizers import Adam
+
+# Compile model
+model.compile(
+    loss="binary_crossentropy",
+    optimizer=Adam(learning_rate=0.0001),
+    metrics=["accuracy"],
+)
 
 
-# Compile the model
-model.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0005), metrics=['accuracy'])
+from tensorflow.keras.callbacks import EarlyStopping
+
+early_stop = EarlyStopping(monitor="val_loss", patience=20)
 
 # Train the model
-model.fit(X_train, y_train, epochs=100, batch_size=32, verbose=1)
+history = model.fit(
+    X_train,
+    y_train,
+    epochs=1000,
+    batch_size=10,
+    validation_data=(X_test, y_test),
+    callbacks=[early_stop],
+)
 
 # Evaluate the model
 _, accuracy = model.evaluate(X_test, y_test, verbose=1)
-print('Accuracy: %.2f' % (accuracy * 100))
+print("Accuracy: %.2f" % (accuracy * 100))
 
 # Evaluate against test data
 test_loss, test_accuracy = model.evaluate(X_test, y_test)
@@ -65,4 +87,18 @@ print(f"False Positives: {fp}")
 print(f"False Negatives: {fn}")
 print(f"True Positives: {tp}")
 
+import matplotlib.pyplot as plt
 
+# Extract the training and validation loss values from the history object
+train_loss = history.history["loss"]
+val_loss = history.history["val_loss"]
+
+# Plot the training and validation loss values over epochs
+epochs = range(1, len(train_loss) + 1)
+plt.plot(epochs, train_loss, "bo", label="Training Loss")
+plt.plot(epochs, val_loss, "b", label="Validation Loss")
+plt.title("Training and Validation Loss")
+plt.xlabel("Epochs")
+plt.ylabel("Loss")
+plt.legend()
+plt.show()

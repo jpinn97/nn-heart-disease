@@ -28,11 +28,11 @@ X_test = scaler.transform(X_test)
 from tensorflow.keras.regularizers import l1, l2
 
 model = Sequential()
-model.add(Dense(256, activation="relu", kernel_regularizer=l2(0.02)))
-model.add(Dense(128, activation="relu", kernel_regularizer=l2(0.02)))
-model.add(Dense(64, activation="relu", kernel_regularizer=l2(0.02)))
-model.add(Dense(32, activation="relu", kernel_regularizer=l2(0.02)))
-model.add(Dense(16, activation="relu", kernel_regularizer=l2(0.02)))
+model.add(Dense(256, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(128, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(64, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(32, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(16, activation="relu", kernel_regularizer=l2(0.01)))
 model.add(Dense(1, activation="sigmoid"))
 
 from tensorflow.keras.optimizers import Adam
@@ -40,21 +40,21 @@ from tensorflow.keras.optimizers import Adam
 # Compile model
 model.compile(
     loss="binary_crossentropy",
-    optimizer=Adam(learning_rate=0.0001),
+    optimizer=Adam(learning_rate=0.0005),
     metrics=["accuracy"],
 )
 
 
 from tensorflow.keras.callbacks import EarlyStopping
 
-early_stop = EarlyStopping(monitor="val_loss", patience=20)
+early_stop = EarlyStopping(monitor="val_loss", patience=10)
 
 # Train the model
 history = model.fit(
     X_train,
     y_train,
-    epochs=1000,
-    batch_size=10,
+    epochs=100,
+    batch_size=16,
     validation_data=(X_test, y_test),
     callbacks=[early_stop],
 )

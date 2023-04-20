@@ -4,14 +4,8 @@ import arff
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.layers import Dense
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l1, l2
-from tensorflow.keras.wrappers.scikit_learn import KerasClassifier
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import classification_report, confusion_matrix
-import matplotlib.pyplot as plt
-from tensorflow.keras.callbacks import EarlyStopping
 
 # Load the dataset
 with open("phpgNaXZe.arff", "r") as f:
@@ -31,46 +25,32 @@ scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
+from tensorflow.keras.regularizers import l1, l2
 
-def create_model(learning_rate=0.001, dropout_rate=0.5):
-    model = Sequential()
-    model.add(Dense(128, activation="relu"))
-    model.add(Dropout(dropout_rate))
-    model.add(Dense(64, activation="relu"))
-    model.add(Dropout(dropout_rate))
-    model.add(Dense(32, activation="relu"))
-    model.add(Dropout(dropout_rate))
-    model.add(Dense(16, activation="relu"))
-    model.add(Dropout(dropout_rate))
-    model.add(Dense(1, activation="sigmoid"))
-    # Compile Model
-    model.compile(
-        loss="binary_crossentropy",
-        optimizer=Adam(learning_rate=learning_rate),
-        metrics=["accuracy"],
-    )
-    return model
+model = Sequential()
+model.add(Dense(256, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(128, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(64, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(32, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(16, activation="relu", kernel_regularizer=l2(0.01)))
+model.add(Dense(1, activation="sigmoid"))
+
+from tensorflow.keras.optimizers import Adam
+
+# Compile model
+model.compile(
+    loss="binary_crossentropy",
+    optimizer=Adam(learning_rate=0.0005),
+    metrics=["accuracy"],
+)
 
 
-# Create a KerasClassifier wrapper
-model = KerasClassifier(build_fn=create_model, epochs=100, batch_size=16, verbose=0)
-
-# Define the parameter grid for the search
-param_grid = {"learning_rate": [0.001, 0.0005, 0.0001], "dropout_rate": [0.3, 0.5, 0.7]}
-
-grid = GridSearchCV(estimator=model, param_grid=param_grid, n_jobs=-1, cv=5)
-grid_result = grid.fit(X_train, y_train)
-
-# Print the best hyperparameters
-print("Best parameters found: ", grid_result.best_params_)
-
-# Train the model with the best hyperparameters
-best_model = grid_result.best_estimator_
+from tensorflow.keras.callbacks import EarlyStopping
 
 early_stop = EarlyStopping(monitor="val_loss", patience=10)
 
-# Train the best model
-history = best_model.fit(
+# Train the model
+history = model.fit(
     X_train,
     y_train,
     epochs=100,
@@ -80,16 +60,15 @@ history = best_model.fit(
 )
 
 # Evaluate the model
-
-_, accuracy = best_model.model.evaluate(X_test, y_test, verbose=1)
+_, accuracy = model.evaluate(X_test, y_test, verbose=1)
 print("Accuracy: %.2f" % (accuracy * 100))
 
 # Evaluate against test data
-test_loss, test_accuracy = best_model.model.evaluate(X_test, y_test)
+test_loss, test_accuracy = model.evaluate(X_test, y_test)
 print(f"Test Loss: {test_loss}, Test Accuracy: {test_accuracy}")
 
 # Make prediction
-predictions = best_model.model.predict(X_test)
+predictions = model.predict(X_test)
 
 # Convert predictions to bianry
 binary_predictions = (predictions > 0.5).astype(int)

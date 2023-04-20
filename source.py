@@ -1,3 +1,5 @@
+# pip install numpy pandas liac-arff scikit-learn tensorflow matplotlib
+
 import numpy as np
 import pandas as pd
 import arff

@@ -4,7 +4,7 @@ import subprocess
 packages = ["numpy", "pandas", "liac-arff", "scikit-learn", "tensorflow", "matplotlib"]
 # Run the pip install command and wait for it to complete
 subprocess.run(["pip", "install"] + packages, check=True)
-
+import tensorrt as rt
 import tensorflow as tf
 import numpy as np
 import pandas as pd
@@ -12,14 +12,14 @@ import arff
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam, RMSprop, Adadelta, Adagrad, Nadam, Ftrl
 from tensorflow.keras.regularizers import l1, l2
 from tensorflow.keras.wrappers.scikit_learn import KerasClassifier
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
 # Load the dataset
 with open("phpgNaXZe.arff", "r") as f:
@@ -39,35 +39,41 @@ scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
+gpus = tf.config.list_physical_devices("GPU")
 
 def enable_dynamic_memory_allocation():
-    # Set the visible GPU devices
-    gpus = tf.config.list_physical_devices("GPU")
+    # Set the GPU as the default device
     if gpus:
         try:
-            for gpu in gpus:
-                # Enable dynamic memory allocation
-                tf.config.experimental.set_memory_growth(gpu, True)
-            print("Dynamic memory allocation enabled for", len(gpus), "GPU(s)")
+            # Restrict TensorFlow to only use the first GPU
+            tf.config.set_visible_devices(gpus[0], "GPU")
+            # Set the memory growth option to True
+            tf.config.experimental.set_memory_growth(gpus[0], True)
+            print("Using GPU:", gpus[0].name)
         except RuntimeError as e:
             print(e)
     else:
-        print("No GPU devices found")
+        print("No GPUs found.")
 
 
 # Call the function to enable dynamic memory allocation for TensorFlow on the GPU
 enable_dynamic_memory_allocation()
 
+
 # Create model with each hyperparameter.
 def create_model(optimizer, epochs, batch_size, learning_rate, dropout_rate):
-    model = tf.keras.Sequential()
+    model = Sequential()
     model.add(Dense(128, activation="relu"))
+    model.add(BatchNormalization())
     model.add(Dropout(dropout_rate))
     model.add(Dense(64, activation="relu"))
+    model.add(BatchNormalization())
     model.add(Dropout(dropout_rate))
     model.add(Dense(32, activation="relu"))
+    model.add(BatchNormalization())
     model.add(Dropout(dropout_rate))
     model.add(Dense(16, activation="relu"))
+    model.add(BatchNormalization())
     model.add(Dropout(dropout_rate))
     model.add(Dense(1, activation="sigmoid"))
     # Compile Model
@@ -79,11 +85,8 @@ def create_model(optimizer, epochs, batch_size, learning_rate, dropout_rate):
     return model
 
 
-# Create a KerasClassifier wrapper
-model = KerasClassifier(build_fn=create_model, verbose=1)
-
-# Define the parameter grid for the search
-param_grid = {
+# Define the parameter distribution for the search
+param_dist = {
     "optimizer": [Adam],
     "learning_rate": [0.001, 0.0005, 0.0001],
     "dropout_rate": [0.3, 0.5, 0.7],
@@ -91,45 +94,64 @@ param_grid = {
     "epochs": [50, 100, 150],
 }
 
-grid = GridSearchCV(estimator=model, param_grid=param_grid, n_jobs=1, cv=5)
-grid_result = grid.fit(X_train, y_train)
+# Create a KerasClassifier wrapper
+model = KerasClassifier(build_fn=create_model, verbose=1)
+
+use_gpu = bool(gpus)
+
+# Set the number of jobs for parallel processing based on GPU availability
+n_jobs = -1 if use_gpu else 1
+
+# Create a RandomizedSearchCV object
+random_search = RandomizedSearchCV(
+    estimator=model,
+    param_distributions=param_dist,
+    cv=5,
+    n_iter=10,
+    n_jobs=n_jobs
+)
+
+# Fit the RandomizedSearchCV object to the data
+random_search.fit(X_train, y_train)
 
 # Print the best hyperparameters
-print("Best parameters found: ", grid_result.best_params_)
+print("Best parameters found: ", random_search.best_params_)
+
+# Create the callbacks
+early_stop = EarlyStopping(monitor="val_loss", patience=10)
+model_checkpoint = ModelCheckpoint(
+    "best_model.h5", monitor="val_accuracy", save_best_only=True
+)
+reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.2, patience=5)
 
 # Train the model with the best hyperparameters
-best_model = grid_result.best_estimator_
+best_model = random_search.best_estimator_
 
-early_stop = EarlyStopping(monitor="val_loss", patience=10)
+# Set the hyperparameters of best_model to the best parameters found by randomized search
+best_model.set_params(**random_search.best_params_)
 
-# Train the best model
+# Fit the model with the best hyperparameters
 history = best_model.fit(
     X_train,
     y_train,
-    epochs=100,
-    batch_size=16,
+    epochs=random_search.best_params_["epochs"],
+    batch_size=random_search.best_params_["batch_size"],
     validation_data=(X_test, y_test),
-    callbacks=[early_stop],
+    callbacks=[early_stop, model_checkpoint, reduce_lr]
 )
 
 # Evaluate the model
-
-_, accuracy = best_model.model.evaluate(X_test, y_test, verbose=1)
-print("Accuracy: %.2f" % (accuracy * 100))
-
-# Evaluate against test data
-test_loss, test_accuracy = best_model.model.evaluate(X_test, y_test)
+test_loss, test_accuracy = best_model.evaluate(X_test, y_test)
 print(f"Test Loss: {test_loss}, Test Accuracy: {test_accuracy}")
 
 # Make prediction
-predictions = best_model.model.predict(X_test)
+predictions = best_model.predict(X_test)
 
-# Convert predictions to bianry
+# Convert predictions to binary
 binary_predictions = (predictions > 0.5).astype(int)
 
-# Analyze performance
-from sklearn.metrics import classification_report, confusion_matrix
 
+# Analyze performance
 print("Classification Report:")
 print(classification_report(y_test, binary_predictions))
 
@@ -146,7 +168,7 @@ train_loss = history.history["loss"]
 val_loss = history.history["val_loss"]
 
 # Create a dataframe to store the grid search results
-results_df = pd.DataFrame(grid_result.cv_results_)
+results_df = pd.DataFrame(random_search.cv_results_)
 
 # Add a column to store the optimizer name
 results_df["optimizer_name"] = results_df["params"].apply(
@@ -160,7 +182,7 @@ results_df["batch_size"] = results_df["params"].apply(lambda x: x["batch_size"])
 results_df["epochs"] = results_df["params"].apply(lambda x: x["epochs"])
 
 # Add a column to store the test accuracy
-results_df["test_accuracy"] = grid_result.cv_results_["mean_test_score"]
+results_df["test_accuracy"] = random_search.cv_results_["mean_test_score"]
 
 # Save the results to a CSV file
 results_df.to_csv("grid_search_results.csv", index=False)

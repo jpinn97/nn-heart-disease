@@ -5,10 +5,6 @@ packages = ["numpy", "pandas", "liac-arff", "scikit-learn", "tensorflow", "matpl
 # Run the pip install command and wait for it to complete
 subprocess.run(["pip", "install"] + packages, check=True)
 
-import tensorflow as tf
-
-print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
-
 import numpy as np
 import pandas as pd
 import arff
@@ -16,9 +12,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.optimizers import Adam, RMSprop, Adadelta, Adagrad, Nadam, Ftrl
+from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l1, l2
-from tensorflow.keras.wrappers.scikit_learn import KerasClassifier
+from scikeras.wrappers import KerasClassifier
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
@@ -43,25 +39,8 @@ X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
 
-def create_model(optimizer, epochs, batch_size, learning_rate=0.001, dropout_rate=0.5):
-    # Check if GPU is available
-    if tf.config.list_physical_devices():
-        print("GPU is available")
-    else:
-        print("GPU is not available")
-
-    # Set the visible GPU devices
-    gpus = tf.config.list_physical_devices("GPU")
-    if gpus:
-        try:
-            tf.config.experimental.set_visible_devices(gpus[0], "GPU")
-            print("Using GPU device:", gpus[0])
-        except RuntimeError as e:
-            print(e)
-    else:
-        print("No GPU devices found")
-
-    model = tf.keras.Sequential()
+def create_model(learning_rate=0.001, dropout_rate=0.5):
+    model = Sequential()
     model.add(Dense(128, activation="relu"))
     model.add(Dropout(dropout_rate))
     model.add(Dense(64, activation="relu"))
@@ -74,32 +53,45 @@ def create_model(optimizer, epochs, batch_size, learning_rate=0.001, dropout_rat
     # Compile Model
     model.compile(
         loss="binary_crossentropy",
-        optimizer=optimizer(learning_rate=learning_rate),
+        optimizer=Adam(learning_rate=learning_rate),
         metrics=["accuracy"],
     )
     return model
 
 
-# Create a KerasClassifier wrapper
-model = KerasClassifier(build_fn=create_model, verbose=1)
+clf = KerasClassifier(
+    model=create_model,
+    loss="binary_crossentropy",
+    optimizer="adam",
+    optimizer__lr=0.1,
+    model__hidden_layer_sizes=(100,),
+    model__dropout=0.5,
+    verbose=False,
+)
 
-# Define the parameter grid for the search
-param_grid = {
-    "optimizer": [Adam, RMSprop, Adadelta, Adagrad, Nadam, Ftrl],
-    "learning_rate": [0.001, 0.0005, 0.0001],
-    "dropout_rate": [0.3, 0.5, 0.7],
-    "batch_size": [16, 32, 64],
-    "epochs": [50, 100, 150],
+params = {
+    "optimizer__lr": [0.05, 0.1],
+    "model__hidden_layer_sizes": [
+        (100,),
+        (
+            50,
+            50,
+        ),
+    ],
+    "model__dropout": [0, 0.5],
 }
 
-grid = GridSearchCV(estimator=model, param_grid=param_grid, n_jobs=-1, cv=5)
-grid_result = grid.fit(X_train, y_train)
+gs = GridSearchCV(clf, params, scoring="accuracy", n_jobs=-1, verbose=True)
+
+gs.fit(X_train, y_train)
+
+print(gs.best_score_, gs.best_params_)
 
 # Print the best hyperparameters
-print("Best parameters found: ", grid_result.best_params_)
+print("Best parameters found: ", gs.best_params_)
 
 # Train the model with the best hyperparameters
-best_model = grid_result.best_estimator_
+best_model = gs.best_estimator_
 
 early_stop = EarlyStopping(monitor="val_loss", patience=10)
 
@@ -146,29 +138,7 @@ print(f"True Positives: {tp}")
 train_loss = history.history["loss"]
 val_loss = history.history["val_loss"]
 
-# Create a dataframe to store the grid search results
-results_df = pd.DataFrame(grid_result.cv_results_)
-
-# Add a column to store the optimizer name
-results_df["optimizer_name"] = results_df["params"].apply(
-    lambda x: x["optimizer"].__name__
-)
-
-# Add columns to store the hyperparameters
-results_df["learning_rate"] = results_df["params"].apply(lambda x: x["learning_rate"])
-results_df["dropout_rate"] = results_df["params"].apply(lambda x: x["dropout_rate"])
-results_df["batch_size"] = results_df["params"].apply(lambda x: x["batch_size"])
-results_df["epochs"] = results_df["params"].apply(lambda x: x["epochs"])
-
-# Add a column to store the test accuracy
-results_df["test_accuracy"] = grid_result.cv_results_["mean_test_score"]
-
-# Save the results to a CSV file
-results_df.to_csv("grid_search_results.csv", index=False)
-
-
 # Plot the training and validation loss values over epochs
-
 epochs = range(1, len(train_loss) + 1)
 plt.plot(epochs, train_loss, "bo", label="Training Loss")
 plt.plot(epochs, val_loss, "b", label="Validation Loss")

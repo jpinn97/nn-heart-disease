@@ -1,25 +1,40 @@
 import subprocess
 
 # List the packages you want to install
-packages = ["numpy", "pandas", "liac-arff", "scikit-learn", "tensorflow", "matplotlib"]
+packages = [
+    "numpy",
+    "pandas",
+    "liac-arff",
+    "scikit-learn",
+    "tensorflow",
+    "matplotlib",
+    "imblearn",
+]
 # Run the pip install command and wait for it to complete
 subprocess.run(["pip", "install"] + packages, check=True)
-import tensorrt as rt
+import os
+import threading
 import tensorflow as tf
 import numpy as np
 import pandas as pd
 import arff
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from tensorboard import program
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
 from tensorflow.keras.optimizers import Adam, RMSprop, Adadelta, Adagrad, Nadam, Ftrl
 from tensorflow.keras.regularizers import l1, l2
 from tensorflow.keras.wrappers.scikit_learn import KerasClassifier
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 import matplotlib.pyplot as plt
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.callbacks import (
+    EarlyStopping,
+    ReduceLROnPlateau,
+    TensorBoard,
+)
+from imblearn.over_sampling import RandomOverSampler
 
 # Load the dataset
 with open("phpgNaXZe.arff", "r") as f:
@@ -29,17 +44,21 @@ df = pd.DataFrame(data, columns=[attr[0] for attr in dataset["attributes"]])
 
 # Preprocessing
 X = df.iloc[:, :-1].values
-y = (
-    df.iloc[:, -1].values.astype(int) - 1
-)  # Convert labels to integers and subtract 1 to have labels in {0, 1}
+y = df.iloc[:, -1].values.astype(int) - 1
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+
+# Split the data into training and testing sets
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42
 )
-scaler = StandardScaler()
-X_train = scaler.fit_transform(X_train)
-X_test = scaler.transform(X_test)
+
+# Perform oversampling on the training set to balance the class distribution
+oversampler = RandomOverSampler()
+X_train, y_train = oversampler.fit_resample(X_train, y_train)
 
 gpus = tf.config.list_physical_devices("GPU")
+
 
 def enable_dynamic_memory_allocation():
     # Set the GPU as the default device
@@ -59,9 +78,28 @@ def enable_dynamic_memory_allocation():
 # Call the function to enable dynamic memory allocation for TensorFlow on the GPU
 enable_dynamic_memory_allocation()
 
+# Create the callbacks
+early_stop = EarlyStopping(monitor="loss", patience=10)
+reduce_lr = ReduceLROnPlateau(monitor="loss", factor=0.2, patience=5)
+
+# Start TensorBoard
+
+log_dir = "./logs"
+
+def start_tensorboard(log_dir):
+    tb = program.TensorBoard()
+    tb.configure(argv=[None, "--logdir", log_dir])
+    url = tb.launch()
+    print(f"TensorBoard is running at {url}")
+
+
+thread = threading.Thread(target=start_tensorboard, args=(log_dir,))
+thread.start()
+tensorboard = tensorboard = TensorBoard(log_dir=log_dir)
+
 
 # Create model with each hyperparameter.
-def create_model(optimizer, epochs, batch_size, learning_rate, dropout_rate):
+def create_model(optimizer, learning_rate, dropout_rate, callbacks):
     model = Sequential()
     model.add(Dense(128, activation="relu"))
     model.add(BatchNormalization())
@@ -82,17 +120,22 @@ def create_model(optimizer, epochs, batch_size, learning_rate, dropout_rate):
         optimizer=optimizer(learning_rate=learning_rate),
         metrics=["accuracy"],
     )
+    # Add Callbacks
+    model.callbacks = callbacks
+
     return model
 
 
 # Define the parameter distribution for the search
 param_dist = {
-    "optimizer": [Adam],
+    "optimizer": [Adam, RMSprop, Adadelta, Adagrad, Nadam, Ftrl],
     "learning_rate": [0.001, 0.0005, 0.0001],
     "dropout_rate": [0.3, 0.5, 0.7],
     "batch_size": [16, 32, 64],
     "epochs": [50, 100, 150],
+    "callbacks": [early_stop, reduce_lr, tensorboard],
 }
+
 
 # Create a KerasClassifier wrapper
 model = KerasClassifier(build_fn=create_model, verbose=1)
@@ -100,56 +143,55 @@ model = KerasClassifier(build_fn=create_model, verbose=1)
 use_gpu = bool(gpus)
 
 # Set the number of jobs for parallel processing based on GPU availability
-n_jobs = -1 if use_gpu else 1
+n_jobs = 1 if use_gpu else -1
 
 # Create a RandomizedSearchCV object
-random_search = RandomizedSearchCV(
+grid_search = GridSearchCV(
     estimator=model,
-    param_distributions=param_dist,
+    param_grid=param_dist,
     cv=5,
-    n_iter=10,
-    n_jobs=n_jobs
+    n_jobs=n_jobs,
 )
 
-# Fit the RandomizedSearchCV object to the data
-random_search.fit(X_train, y_train)
+# Fit the GridSearchCV object to the data
+grid_search.fit(X_train, y_train, callbacks=[early_stop, reduce_lr, tensorboard])
 
 # Print the best hyperparameters
-print("Best parameters found: ", random_search.best_params_)
-
-# Create the callbacks
-early_stop = EarlyStopping(monitor="val_loss", patience=10)
-model_checkpoint = ModelCheckpoint(
-    "best_model.h5", monitor="val_accuracy", save_best_only=True
-)
-reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.2, patience=5)
+print("Best parameters found: ", grid_search.best_params_)
 
 # Train the model with the best hyperparameters
-best_model = random_search.best_estimator_
+best_model = grid_search.best_estimator_
 
 # Set the hyperparameters of best_model to the best parameters found by randomized search
-best_model.set_params(**random_search.best_params_)
+best_model.set_params(**grid_search.best_params_)
+
+from keras.models import save_model
+
+# Save best_model weights.
+save_model(best_model.model, "best_model_save", save_format="tf")
 
 # Fit the model with the best hyperparameters
 history = best_model.fit(
     X_train,
     y_train,
-    epochs=random_search.best_params_["epochs"],
-    batch_size=random_search.best_params_["batch_size"],
+    epochs=grid_search.best_params_["epochs"],
+    batch_size=grid_search.best_params_["batch_size"],
     validation_data=(X_test, y_test),
-    callbacks=[early_stop, model_checkpoint, reduce_lr]
+    callbacks=[early_stop, reduce_lr, tensorboard],
 )
 
 # Evaluate the model
-test_loss, test_accuracy = best_model.evaluate(X_test, y_test)
+test_loss, test_accuracy = best_model.model.evaluate(X_test, y_test)
 print(f"Test Loss: {test_loss}, Test Accuracy: {test_accuracy}")
 
 # Make prediction
 predictions = best_model.predict(X_test)
 
+# Get the predicted probabilities
+y_pred_prob = best_model.predict_proba(X_test)[:, 1]
+
 # Convert predictions to binary
 binary_predictions = (predictions > 0.5).astype(int)
-
 
 # Analyze performance
 print("Classification Report:")
@@ -163,12 +205,16 @@ print(f"False Positives: {fp}")
 print(f"False Negatives: {fn}")
 print(f"True Positives: {tp}")
 
+# Calculate AUC score
+auc_score = roc_auc_score(y_test, y_pred_prob)
+print("AUC Score:", auc_score)
+
 # Extract the training and validation loss values from the history object
 train_loss = history.history["loss"]
 val_loss = history.history["val_loss"]
 
 # Create a dataframe to store the grid search results
-results_df = pd.DataFrame(random_search.cv_results_)
+results_df = pd.DataFrame(grid_search.cv_results_)
 
 # Add a column to store the optimizer name
 results_df["optimizer_name"] = results_df["params"].apply(
@@ -182,14 +228,12 @@ results_df["batch_size"] = results_df["params"].apply(lambda x: x["batch_size"])
 results_df["epochs"] = results_df["params"].apply(lambda x: x["epochs"])
 
 # Add a column to store the test accuracy
-results_df["test_accuracy"] = random_search.cv_results_["mean_test_score"]
+results_df["test_accuracy"] = grid_search.cv_results_["mean_test_score"]
 
 # Save the results to a CSV file
 results_df.to_csv("grid_search_results.csv", index=False)
 
-
 # Plot the training and validation loss values over epochs
-
 epochs = range(1, len(train_loss) + 1)
 plt.plot(epochs, train_loss, "bo", label="Training Loss")
 plt.plot(epochs, val_loss, "b", label="Validation Loss")

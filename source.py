@@ -6,9 +6,6 @@ packages = ["numpy", "pandas", "liac-arff", "scikit-learn", "tensorflow", "matpl
 subprocess.run(["pip", "install"] + packages, check=True)
 
 import tensorflow as tf
-
-print("Num GPUs Available: ", len(tf.config.list_physical_devices("GPU")))
-
 import numpy as np
 import pandas as pd
 import arff
@@ -43,24 +40,26 @@ X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
 
-def create_model(optimizer, epochs, batch_size, learning_rate=0.001, dropout_rate=0.5):
-    # Check if GPU is available
-    if tf.config.list_physical_devices():
-        print("GPU is available")
-    else:
-        print("GPU is not available")
-
+def enable_dynamic_memory_allocation():
     # Set the visible GPU devices
     gpus = tf.config.list_physical_devices("GPU")
     if gpus:
         try:
-            tf.config.experimental.set_visible_devices(gpus[0], "GPU")
-            print("Using GPU device:", gpus[0])
+            for gpu in gpus:
+                # Enable dynamic memory allocation
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("Dynamic memory allocation enabled for", len(gpus), "GPU(s)")
         except RuntimeError as e:
             print(e)
     else:
         print("No GPU devices found")
 
+
+# Call the function to enable dynamic memory allocation for TensorFlow on the GPU
+enable_dynamic_memory_allocation()
+
+# Create model with each hyperparameter.
+def create_model(optimizer, epochs, batch_size, learning_rate, dropout_rate):
     model = tf.keras.Sequential()
     model.add(Dense(128, activation="relu"))
     model.add(Dropout(dropout_rate))
@@ -85,14 +84,14 @@ model = KerasClassifier(build_fn=create_model, verbose=1)
 
 # Define the parameter grid for the search
 param_grid = {
-    "optimizer": [Adam, RMSprop, Adadelta, Adagrad, Nadam, Ftrl],
+    "optimizer": [Adam],
     "learning_rate": [0.001, 0.0005, 0.0001],
     "dropout_rate": [0.3, 0.5, 0.7],
     "batch_size": [16, 32, 64],
     "epochs": [50, 100, 150],
 }
 
-grid = GridSearchCV(estimator=model, param_grid=param_grid, n_jobs=-1, cv=5)
+grid = GridSearchCV(estimator=model, param_grid=param_grid, n_jobs=1, cv=5)
 grid_result = grid.fit(X_train, y_train)
 
 # Print the best hyperparameters

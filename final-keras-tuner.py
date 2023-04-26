@@ -9,17 +9,37 @@ from sklearn.preprocessing import StandardScaler
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers
 import keras
-import matplotlib as mpl
+
+import matplotlib
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
 import keras_tuner
-from keras import backend as K
 
+# Check if GPU is available
+print(
+    "GPU is", "available" if tf.config.list_physical_devices("GPU") else "NOT AVAILABLE"
+)
+# Check if CPU is available
+print(
+    "CPU is", "available" if tf.config.list_physical_devices("CPU") else "NOT AVAILABLE"
+)
+
+num_physical_cores = os.cpu_count()
+num_sockets = 1
+
+# Set TensorFlow configuration
 config = tf.compat.v1.ConfigProto()
 config.gpu_options.allow_growth = True
-sess = tf.compat.v1.Session(config=config)
-K.set_session(sess)
+config.log_device_placement = True
+config.allow_soft_placement = True
+config.intra_op_parallelism_threads = num_physical_cores
+config.inter_op_parallelism_threads = num_sockets
+session = tf.compat.v1.Session(config=config)
+tf.compat.v1.keras.backend.set_session(session)
+
+if matplotlib.get_backend() == "agg":
+    matplotlib.use("TkAgg")
 
 # Load the dataset
 with open("phpgNaXZe.arff", "r") as f:
@@ -261,41 +281,49 @@ initial_bias = np.log([pos / neg])
 
 make_model(keras_tuner.HyperParameters(), output_bias=initial_bias)
 
-tuner = keras_tuner.RandomSearch(
+tuner = keras_tuner.BayesianOptimization(
     hypermodel=make_model,
-    objective="val_accuracy",
-    max_trials=100,
+    objective="val_loss",
+    max_trials=1,
     executions_per_trial=3,
+    seed=42,
     overwrite=True,
     directory="my_dir",
-    project_name="helloworld",
+    project_name="bayesian_optimization",
 )
 
 tuner.search_space_summary()
-input()
 
 tuner.search(
     train_features,
     train_labels,
-    epochs=3,
+    epochs=20,
     validation_data=(val_features, val_labels),
 )
 
-input()
+# Get the best model
+best_model = tuner.get_best_models()[0]
 
-model = make_model(output_bias=initial_bias)
-model.summary()
-model.predict(train_features[:10])
-results = model.evaluate(train_features, train_labels, batch_size=BATCH_SIZE, verbose=0)
+tuner.results_summary()
+best_model.build(input_shape=(None, 9))
+best_model.summary()
+
+best_model.predict(train_features[:10])
+results = best_model.evaluate(
+    train_features, train_labels, batch_size=BATCH_SIZE, verbose=0
+)
 print("Initial Bias", initial_bias)
 print("Loss: {:0.4f}".format(results[0]))
 
 initial_weights = os.path.join(tempfile.mkdtemp(), "initial_weights")
-model.save_weights(initial_weights)
+best_model.save_weights(initial_weights)
 
-model = make_model()
-model.load_weights(initial_weights)
-baseline_history = model.fit(
+input()
+
+# Load the initial weights to the best model
+best_model.load_weights(initial_weights)
+
+baseline_history = best_model.fit(
     train_features,
     train_labels,
     batch_size=BATCH_SIZE,
@@ -304,7 +332,7 @@ baseline_history = model.fit(
     validation_data=(val_features, val_labels),
 )
 
-mpl.rcParams["figure.figsize"] = (12, 10)
+matplotlib.rcParams["figure.figsize"] = (12, 10)
 colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
 
@@ -336,8 +364,8 @@ def plot_metrics(history):
 plot_metrics(baseline_history)
 plt.show()
 
-train_predictions_baseline = model.predict(train_features, batch_size=BATCH_SIZE)
-test_predictions_baseline = model.predict(test_features, batch_size=BATCH_SIZE)
+train_predictions_baseline = best_model.predict(train_features, batch_size=BATCH_SIZE)
+test_predictions_baseline = best_model.predict(test_features, batch_size=BATCH_SIZE)
 
 
 def plot_cm(labels, predictions, p=0.5):
@@ -354,10 +382,10 @@ def plot_cm(labels, predictions, p=0.5):
     print("Correctly Predict chd (True Positives): ", cm[1][1])
 
 
-baseline_results = model.evaluate(
+baseline_results = best_model.evaluate(
     test_features, test_labels, batch_size=BATCH_SIZE, verbose=0
 )
-for name, value in zip(model.metrics_names, baseline_results):
+for name, value in zip(best_model.metrics_names, baseline_results):
     print(name, ": ", value)
 print()
 
@@ -374,32 +402,67 @@ class_weight = {0: weight_for_0, 1: weight_for_1}
 
 print("Weight for class 0: {:.2f}".format(weight_for_0))
 print("Weight for class 1: {:.2f}".format(weight_for_1))
-weighted_model = make_model()
-weighted_model.load_weights(initial_weights)
 
-weighted_history = weighted_model.fit(
+
+# Save the best model's architecture to a temporary JSON file
+with open("temp_architecture.json", "w") as f:
+    f.write(best_model.to_json())
+
+# Save the best model's weights to a temporary file
+best_model.save_weights("temp_weights.h5")
+
+# Read the architecture JSON contents
+with open("temp_architecture.json", "r") as f:
+    architecture_json = f.read()
+
+# Load the architecture for the best model into a separate variable
+loaded_model = keras.models.model_from_json(architecture_json)
+
+# Load the weights for both models
+loaded_model.load_weights("temp_weights.h5")
+
+# Compile the best model with its original configuration
+best_model.compile(
+    optimizer=best_model.optimizer,
+    loss=keras.losses.BinaryCrossentropy(),
+    metrics=METRICS,
+)
+
+# Compile the loaded_model with the same configuration as the best model
+weighted_best_model = keras.models.model_from_json(architecture_json)
+
+weighted_best_model.compile(
+    optimizer=best_model.optimizer,
+    loss=keras.losses.BinaryCrossentropy(),
+    metrics=METRICS,
+)
+
+# Continue with training and evaluation as before
+# Train the weighted_best_model with class weights
+weighted_history = weighted_best_model.fit(
     train_features,
     train_labels,
     batch_size=BATCH_SIZE,
     epochs=EPOCHS,
     callbacks=[early_stopping],
     validation_data=(val_features, val_labels),
-    # Class weights
     class_weight=class_weight,
 )
 
 plot_metrics(weighted_history)
 plt.show()
 
-train_predictions_weighted = weighted_model.predict(
+train_predictions_weighted = weighted_best_model.predict(
     train_features, batch_size=BATCH_SIZE
 )
-test_predictions_weighted = weighted_model.predict(test_features, batch_size=BATCH_SIZE)
+test_predictions_weighted = weighted_best_model.predict(
+    test_features, batch_size=BATCH_SIZE
+)
 
-weighted_results = weighted_model.evaluate(
+weighted_results = weighted_best_model.evaluate(
     test_features, test_labels, batch_size=BATCH_SIZE, verbose=0
 )
-for name, value in zip(weighted_model.metrics_names, weighted_results):
+for name, value in zip(weighted_best_model.metrics_names, weighted_results):
     print(name, ": ", value)
 print()
 

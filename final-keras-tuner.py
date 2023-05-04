@@ -1,18 +1,32 @@
+import json
 import os
 import tempfile
 import arff
 import numpy as np
 import pandas as pd
+import tensorboard
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers
-import keras
-
+from imblearn.over_sampling import SMOTE
+import keras.layers
+from keras_tuner import HyperParameters, Objective
 import matplotlib
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import (
+    auc,
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 import seaborn as sns
 import keras_tuner
 
@@ -50,16 +64,17 @@ raw_df = pd.DataFrame(data, columns=[attr[0] for attr in dataset["attributes"]])
 
 cleaned_df = raw_df.copy()
 
-# Replace all occurrences of 2 with 1, 1 with 2 in the "chd" column to binary fit the original label
+# Replace all occurrences of 2 with 1, 1 with 0 in the "chd" column to binary fit the original label
 cleaned_df["chd"] = cleaned_df["chd"].replace(["2", "1"], ["1", "0"])
 # Replace all occurrences of 2 with 0 in the "famhist" column
 cleaned_df["famhist"] = cleaned_df["famhist"].replace("2", "0")
 
 # Panda recognises all as objects (string?)
 print(cleaned_df.dtypes)
-
 # Apply numeric
 cleaned_df = cleaned_df.apply(pd.to_numeric, errors="coerce")
+
+print(cleaned_df.isna().sum())
 
 # Check again
 print(cleaned_df.dtypes)
@@ -80,14 +95,6 @@ print(
             "chd",
         ]
     ].describe()
-)
-
-neg, pos = np.bincount(cleaned_df["chd"])
-total = neg + pos
-print(
-    "Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of total)\n".format(
-        total, pos, 100 * pos / total
-    )
 )
 
 # Create a list of columns to perform outlier detection on. (Not Target chd, or famihist)
@@ -174,19 +181,25 @@ train_features = np.array(train_df)
 val_features = np.array(val_df)
 test_features = np.array(test_df)
 
+# Apply SMOTE to the training set
+smote = SMOTE(random_state=42)
+train_features_resampled, train_labels_resampled = smote.fit_resample(
+    train_features, train_labels
+)
+
 # Makes all columns on a standard scale, by removing the mean and applying std of 0.
 
 scaler = StandardScaler()
-train_features = scaler.fit_transform(train_features)
+train_features_resampled = scaler.fit_transform(train_features_resampled)
 
 val_features = scaler.transform(val_features)
 test_features = scaler.transform(test_features)
 
-print("Training labels shape:", train_labels.shape)
+print("Training labels shape:", train_labels_resampled.shape)
 print("Validation labels shape:", val_labels.shape)
 print("Test labels shape:", test_labels.shape)
 
-print("Training features shape:", train_features.shape)
+print("Training features shape:", train_features_resampled.shape)
 print("Validation features shape:", val_features.shape)
 print("Test features shape:", test_features.shape)
 
@@ -224,6 +237,37 @@ plt.title("No Outliers")
 plt.tight_layout()
 plt.show()
 
+# Calculate class ratio and weights for original training data
+train_targets = cleaned_df["chd"].values
+counts = np.bincount(train_targets)
+print("Original Training Data:")
+print(
+    "Number of positive samples in training data: {} ({:.2f}% of total)".format(
+        counts[1], 100 * float(counts[1]) / len(train_targets)
+    )
+)
+class_weights = compute_class_weight("balanced", classes=[0, 1], y=train_targets)
+class_weights = {i: weight for i, weight in enumerate(class_weights)}
+print("Class weights:", class_weights)
+
+# Calculate class ratio and weights for resampled training data
+train_targets_resampled = train_labels_resampled
+counts_resampled = np.bincount(train_targets_resampled)
+print("Resampled Training Data:")
+print(
+    "Number of positive samples in training data: {} ({:.2f}% of total)".format(
+        counts_resampled[1],
+        100 * float(counts_resampled[1]) / len(train_targets_resampled),
+    )
+)
+class_weights_resampled = compute_class_weight(
+    "balanced", classes=[0, 1], y=train_targets_resampled
+)
+class_weights_resampled = {
+    i: weight for i, weight in enumerate(class_weights_resampled)
+}
+print("Class weights:", class_weights_resampled)
+
 # Keras Evaluation metrics
 
 METRICS = [
@@ -241,17 +285,25 @@ METRICS = [
 
 
 # Construct model
-def make_model(hp, metrics=METRICS, output_bias=None):
+def build_model(hp, output_bias=None):
     if output_bias is not None:
         output_bias = tf.keras.initializers.Constant(output_bias)
     model = keras.Sequential()
-    model.add(layers.Flatten())
+    model.add(
+        layers.Dense(
+            units=hp.Int(f"units_{0}", min_value=8, max_value=512, step=32),
+            activation=hp.Choice("activation", ["relu", "tanh", "elu", "LeakyReLU"]),
+            input_shape=(train_features_resampled.shape[-1],),
+        ),
+    )
+    if hp.Boolean("dropout"):
+        model.add(layers.Dropout(rate=0.25))
     # Tune the number of layers.
     for i in range(hp.Int("num_layers", 1, 5)):
         model.add(
             layers.Dense(
                 # Tune number of units separately.
-                units=hp.Int(f"units_{i}", min_value=32, max_value=512, step=32),
+                units=hp.Int(f"units_{i}", min_value=8, max_value=512, step=16),
                 activation=hp.Choice(
                     "activation", ["relu", "tanh", "elu", "LeakyReLU"]
                 ),
@@ -259,213 +311,134 @@ def make_model(hp, metrics=METRICS, output_bias=None):
         )
     if hp.Boolean("dropout"):
         model.add(layers.Dropout(rate=0.25))
+
     model.add(layers.Dense(1, activation="sigmoid", bias_initializer=output_bias))
-    learning_rate = hp.Float("lr", min_value=1e-5, max_value=1e-2, sampling="log")
+
+    learning_rate = hp.Float("lr", min_value=5e-5, max_value=1e-2, sampling="log")
+
+    # Add optimizer choice to hyperparameters
+    optimizer_choice = hp.Choice("optimizer", ["adam", "sgd", "rmsprop"])
+
+    # Set up optimizer based on choice
+    if optimizer_choice == "adam":
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
+    elif optimizer_choice == "sgd":
+        optimizer = keras.optimizers.SGD(learning_rate=learning_rate)
+    elif optimizer_choice == "rmsprop":
+        optimizer = keras.optimizers.RMSprop(learning_rate=learning_rate)
+
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=optimizer,
         loss=keras.losses.BinaryCrossentropy(),
-        metrics=metrics,
+        metrics=METRICS,
     )
 
     return model
 
 
-EPOCHS = 300
-BATCH_SIZE = 64
-
 early_stopping = tf.keras.callbacks.EarlyStopping(
-    monitor="val_prc", verbose=1, patience=10, mode="max", restore_best_weights=True
+    monitor="val_auc",
+    min_delta=0,
+    patience=10,
+    verbose=1,
+    mode="auto",
+    baseline=None,
+    restore_best_weights=True,
+    start_from_epoch=0,
 )
 
-initial_bias = np.log([pos / neg])
+# Count labels
+positive_count = np.sum(train_labels_resampled)
+total_count = len(train_labels_resampled)
+negative_count = total_count - positive_count
 
-make_model(keras_tuner.HyperParameters(), output_bias=initial_bias)
+# Calculate the ratio of the positive samples to the negative samples
+ratio = positive_count / negative_count
+
+# Calculate the initial bias
+initial_bias = np.log(ratio)
+
+print("Initial bias:", initial_bias)
+
+build_model(HyperParameters(), output_bias=initial_bias)
+
+# Specify the objective
+objectives = [
+    Objective("val_loss", direction="min"),
+    Objective("val_accuracy", direction="max"),
+    Objective("val_auc", direction="max"),
+]
 
 tuner = keras_tuner.BayesianOptimization(
-    hypermodel=make_model,
-    objective="val_loss",
+    hypermodel=lambda hp: build_model(hp, output_bias=initial_bias),
+    objective=objectives,
     max_trials=1,
-    executions_per_trial=3,
+    executions_per_trial=2,
+    tune_new_entries=True,
+    allow_new_entries=True,
     seed=42,
-    overwrite=True,
+    overwrite=False,
     directory="my_dir",
     project_name="bayesian_optimization",
 )
 
 tuner.search_space_summary()
 
+batch_size = 64
+
+tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir="./logs")
+'''
 tuner.search(
-    train_features,
-    train_labels,
-    epochs=20,
+    train_features_resampled,
+    train_labels_resampled,
+    epochs=300,
+    class_weight=class_weights,
+    batch_size=batch_size,
+    callbacks=[early_stopping, tensorboard_callback],
     validation_data=(val_features, val_labels),
 )
-
-# Get the best model
-best_model = tuner.get_best_models()[0]
-
+'''
 tuner.results_summary()
-best_model.build(input_shape=(None, 9))
-best_model.summary()
 
-best_model.predict(train_features[:10])
-results = best_model.evaluate(
-    train_features, train_labels, batch_size=BATCH_SIZE, verbose=0
-)
-print("Initial Bias", initial_bias)
-print("Loss: {:0.4f}".format(results[0]))
+best_model = tuner.get_best_models(num_models=1)[0]
 
-initial_weights = os.path.join(tempfile.mkdtemp(), "initial_weights")
-best_model.save_weights(initial_weights)
+evaluation_metrics = best_model.evaluate(test_features, test_labels)
+test_loss = evaluation_metrics[0]
+test_accuracy = evaluation_metrics[1]
 
-input()
+# Compute the predicted labels for the test set
+predicted_labels = (best_model.predict(test_features) > 0.5).astype(int)
 
-# Load the initial weights to the best model
-best_model.load_weights(initial_weights)
+# Compute the test accuracy, ROC AUC, precision, recall, and F1 score based on the true and predicted labels
+accuracy = accuracy_score(test_labels, predicted_labels)
+roc_auc = roc_auc_score(test_labels, predicted_labels)
+precision = precision_score(test_labels, predicted_labels)
+recall = recall_score(test_labels, predicted_labels)
+f1 = f1_score(test_labels, predicted_labels)
 
-baseline_history = best_model.fit(
-    train_features,
-    train_labels,
-    batch_size=BATCH_SIZE,
-    epochs=EPOCHS,
-    callbacks=[early_stopping],
-    validation_data=(val_features, val_labels),
-)
+# Compute the precision-recall curve and ROC curve
+precision_curve, recall_curve, _ = precision_recall_curve(test_labels, predicted_labels)
+fpr, tpr, _ = roc_curve(test_labels, predicted_labels)
 
-matplotlib.rcParams["figure.figsize"] = (12, 10)
-colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+# Compute the area under the precision-recall curve and ROC curve
+prc_auc = auc(recall_curve, precision_curve)
+roc_auc = auc(fpr, tpr)
 
+# Compute the confusion matrix based on the true and predicted labels
+cm = confusion_matrix(test_labels, predicted_labels)
 
-def plot_metrics(history):
-    metrics = ["loss", "prc", "precision", "recall"]
-    for n, metric in enumerate(metrics):
-        name = metric.replace("_", " ").capitalize()
-        plt.subplot(2, 2, n + 1)
-        plt.plot(history.epoch, history.history[metric], color=colors[0], label="Train")
-        plt.plot(
-            history.epoch,
-            history.history["val_" + metric],
-            color=colors[0],
-            linestyle="--",
-            label="Val",
-        )
-        plt.xlabel("Epoch")
-        plt.ylabel(name)
-        if metric == "loss":
-            plt.ylim([0, plt.ylim()[1]])
-        elif metric == "auc":
-            plt.ylim([0.8, 1])
-        else:
-            plt.ylim([0, 1])
-
-        plt.legend()
-
-
-plot_metrics(baseline_history)
+# Plot the confusion matrix using seaborn
+sns.heatmap(cm, annot=True, cmap="Blues", fmt="g")
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.title(f"Model {i + 1} Confusion Matrix")
 plt.show()
 
-train_predictions_baseline = best_model.predict(train_features, batch_size=BATCH_SIZE)
-test_predictions_baseline = best_model.predict(test_features, batch_size=BATCH_SIZE)
-
-
-def plot_cm(labels, predictions, p=0.5):
-    cm = confusion_matrix(labels, predictions > p)
-    plt.figure(figsize=(5, 5))
-    sns.heatmap(cm, annot=True, fmt="d")
-    plt.title("Confusion matrix @{:.2f}".format(p))
-    plt.ylabel("Actual label")
-    plt.xlabel("Predicted label")
-
-    print("Correctly Predict no chd (True Negatives): ", cm[0][0])
-    print("Falsely Predict chd (False Positives): ", cm[0][1])
-    print("Falsely Predict no chd (False Negatives): ", cm[1][0])
-    print("Correctly Predict chd (True Positives): ", cm[1][1])
-
-
-baseline_results = best_model.evaluate(
-    test_features, test_labels, batch_size=BATCH_SIZE, verbose=0
-)
-for name, value in zip(best_model.metrics_names, baseline_results):
-    print(name, ": ", value)
-print()
-
-# Plot Confusion Matrix
-plot_cm(test_labels, test_predictions_baseline)
-plt.show()
-
-# Calculate the class weights based on the imbalance ratio
-
-weight_for_0 = (1 / neg) * (total / 2.0)
-weight_for_1 = (1 / pos) * (total / 2.0)
-
-class_weight = {0: weight_for_0, 1: weight_for_1}
-
-print("Weight for class 0: {:.2f}".format(weight_for_0))
-print("Weight for class 1: {:.2f}".format(weight_for_1))
-
-
-# Save the best model's architecture to a temporary JSON file
-with open("temp_architecture.json", "w") as f:
-    f.write(best_model.to_json())
-
-# Save the best model's weights to a temporary file
-best_model.save_weights("temp_weights.h5")
-
-# Read the architecture JSON contents
-with open("temp_architecture.json", "r") as f:
-    architecture_json = f.read()
-
-# Load the architecture for the best model into a separate variable
-loaded_model = keras.models.model_from_json(architecture_json)
-
-# Load the weights for both models
-loaded_model.load_weights("temp_weights.h5")
-
-# Compile the best model with its original configuration
-best_model.compile(
-    optimizer=best_model.optimizer,
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=METRICS,
-)
-
-# Compile the loaded_model with the same configuration as the best model
-weighted_best_model = keras.models.model_from_json(architecture_json)
-
-weighted_best_model.compile(
-    optimizer=best_model.optimizer,
-    loss=keras.losses.BinaryCrossentropy(),
-    metrics=METRICS,
-)
-
-# Continue with training and evaluation as before
-# Train the weighted_best_model with class weights
-weighted_history = weighted_best_model.fit(
-    train_features,
-    train_labels,
-    batch_size=BATCH_SIZE,
-    epochs=EPOCHS,
-    callbacks=[early_stopping],
-    validation_data=(val_features, val_labels),
-    class_weight=class_weight,
-)
-
-plot_metrics(weighted_history)
-plt.show()
-
-train_predictions_weighted = weighted_best_model.predict(
-    train_features, batch_size=BATCH_SIZE
-)
-test_predictions_weighted = weighted_best_model.predict(
-    test_features, batch_size=BATCH_SIZE
-)
-
-weighted_results = weighted_best_model.evaluate(
-    test_features, test_labels, batch_size=BATCH_SIZE, verbose=0
-)
-for name, value in zip(weighted_best_model.metrics_names, weighted_results):
-    print(name, ": ", value)
-print()
-
-# Plot weighted confusion matrix.
-plot_cm(test_labels, test_predictions_weighted)
-plt.show()
+# Print the evaluation metrics for the model
+print(f"\nModel {i + 1} evaluation:")
+print(f"Test accuracy: {accuracy:.4f}")
+print(f"ROC AUC: {roc_auc:.4f}")
+print(f"PRC AUC: {prc_auc:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 score: {f1:.4f}")

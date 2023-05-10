@@ -1,0 +1,8 @@
+param_dist = {
+    "optimizer": [Adam],
+    "learning_rate": [0.001, 0.0005, 0.0001],
+    "dropout_rate": [0.3, 0.5, 0.7],
+    "batch_size": [16, 32, 64],
+    "epochs": [50, 100, 150],
+    "callbacks": [early_stop, reduce_lr],
+}
